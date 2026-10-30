@@ -93,6 +93,8 @@ public class Paxos
 
 		this.myProcess = myProcess;
 
+		this.logger = logger;
+
 		// Sort the member list so that every process will derives their unique id and same order
 		// Use the TreeSet to sort the process also eliminate the duplicate process
 		TreeSet<String> members = new TreeSet<>(Arrays.asList(allGroupProcesses));
