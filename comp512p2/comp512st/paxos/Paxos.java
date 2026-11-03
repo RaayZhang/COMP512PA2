@@ -315,6 +315,7 @@ public class Paxos
 					if (p.noOperation) continue;  // No operation
 					return p.val;
 				}
+				if (!running) throw new InterruptedException("Paxos is shut down");
 				lock.wait(); // release the lock and wait, when it been awake it will check above conditions
 			}
 		}
@@ -326,9 +327,31 @@ public class Paxos
 	public void shutdownPaxos()
 	{
 		// notify other threads
-		running = false;
-		listnerThread.interrupt(); 
-		gcl.shutdownGCL();
+		synchronized (lock){
+    		running = false;
+    		lock.notifyAll();   // 叫醒所有在 lock 上 wait 的线程，让它们马上检查 running
+		}
+		// 2. 用一个新线程关闭 GCL，main 线程最多等 2 秒。
+		//  正常情况下，shutdownGCL() 最后会往接收队列放一个关闭标记，
+		// 监听线程的 readGCMessage() 读到它就会抛出 InterruptedException，自然退出。
+		//  但如果别的玩家还开着而且不再发消息，shutdownGCL() 会卡住，所以不能无限期地等。
+		Thread closer = new Thread(() -> gcl.shutdownGCL(), "paxos-gcl-shutdown");
+		closer.setDaemon(true);
+		closer.start();
+
+		try {
+			closer.join(2000); // 等 GCL 关闭，最多 2 秒
+			listnerThread.join(500); // 再等监听线程退出，最多 0.5 秒
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+
+		// 3. 后备：GCL 没能在时限内关好，监听线程还活着，就主动打断它。
+		// 只有这种情况下才会出现那条 InterruptedException 的 SEVERE 日志。
+		if (listnerThread.isAlive()) {
+			logger.warning("Paxos: GCL did not finish shutting down in time, interrupting listener");
+			listnerThread.interrupt();
+		}
 	}
 
 	// get the status for the certain slot
@@ -474,6 +497,8 @@ public class Paxos
 					// 然后才发送。网络操作可能比较慢，持有锁去做会让其他线程（比如 acceptTOMsg）白白等待。
 
 					send(reply, senderAddress); // send vote to the proposer
+					// fail point：投票（PROMISE 或 REFUSE）发出之后立刻检查。
+					failCheck.checkFailure(FailCheck.FailureType.AFTERSENDVOTE);
 					break;
 				}
 			case ACCEPT:
